@@ -7,4 +7,4 @@ authors = ["Raphael Catolino <raphael.catolino@gmail.com>"]
 crate-type = ["dylib"]
 
 [dependencies]
-pam_sm = { path = "../pam_sm", version = "0.1"}
+pam_sm = { path = "../pam_sm_rust", version = "0.1"}
