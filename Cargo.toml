@@ -1,0 +1,10 @@
+[package]
+name = "pam-e4addkey"
+version = "0.1.0"
+authors = ["Raphael Catolino <raphael.catolino@gmail.com>"]
+
+[lib]
+crate-type = ["dylib"]
+
+[dependencies]
+pam_sm = { path = "../pam_sm", version = "0.1"}
