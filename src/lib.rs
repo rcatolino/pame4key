@@ -7,12 +7,9 @@ use keyutils::{Keyring, SpecialKeyring};
 use pam_sm::pam::{PamServiceModule, Pam, PamFlag, PamReturnCode};
 use ring::{digest, pbkdf2};
 use std::error::Error;
-use std::ffi::CStr;
 use std::fmt;
 use std::fs::File;
 use std::mem::transmute;
-use std::process::{Command, Stdio};
-use std::io::Write;
 use std::os::unix::io::AsRawFd;
 
 const PBKDF2_ITERATIONS: usize = 0xFFFF;
@@ -117,16 +114,6 @@ fn add_key2(key: &Ext4Key) -> Result<(), String> {
     key.key_ref_str().map_err(|e| format!("{}", e)).
         and_then(|ref refstr| keyring.add_logon_key(refstr, &key.to_payload()).map_err(|e| format!("{}", e))).
         map(|_| ())
-}
-
-fn add_key(token: &CStr) -> Result<(), Box<Error>> {
-    let mut process = try!(Command::new("/usr/bin/e4crypt").stdin(Stdio::piped()).arg("add_key").arg("-q").spawn());
-    let result = match process.stdin {
-        Some(ref mut stdin) => stdin.write_all(token.to_bytes()).and_then(|_| stdin.flush()).map_err(|e| From::from(e)),
-        None => Err(From::from("failed to write to e4crypt stdin")),
-    };
-    try!(process.wait());
-    result
 }
 
 impl PamServiceModule for SM {
