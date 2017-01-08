@@ -4,6 +4,7 @@ extern crate pam_sm;
 extern crate ring;
 
 use keyutils::{Keyring, SpecialKeyring};
+use nix::unistd::{geteuid, getuid};
 use pam_sm::pam::{PamServiceModule, Pam, PamFlag, PamReturnCode};
 use ring::{digest, pbkdf2};
 use std::error::Error;
@@ -25,7 +26,6 @@ impl Salt {
     fn new(path: &String) -> Result<Salt, Box<Error>> {
         let f = try!(File::open(path));
         let salt = [0u8; SALT_SIZE];
-        println!("File descriptor of {} : {}", path, f.as_raw_fd());
         try!(unsafe {
             Salt::fs_get_pwsalt(f.as_raw_fd(), salt.as_ptr(), SALT_SIZE)
         });
@@ -65,8 +65,6 @@ impl Ext4Key {
             mode: Ext4EncryptionMode::Aes256Xts,
             key_ref: Default::default()
         };
-        println!("Using token: {:?}", token);
-        println!("Using salt : {}", salt);
         pbkdf2::derive(&pbkdf2::HMAC_SHA512, PBKDF2_ITERATIONS, &salt.0, token, &mut key.key);
         let digest = digest::digest(&digest::SHA512, &key.key);
         for (src, dst) in digest.as_ref().iter().zip(key.key_ref.iter_mut()) {
@@ -83,7 +81,6 @@ impl Ext4Key {
         for b in self.key_ref.iter() {
             try!(write!(ref_str, "{:02x}", b));
         }
-        println!("key description str : {}", &ref_str);
         Ok(ref_str)
     }
 
@@ -109,38 +106,37 @@ impl fmt::Display for Ext4Key {
     }
 }
 
-fn add_key2(key: &Ext4Key) -> Result<(), String> {
+fn add_key2(key: &Ext4Key) -> Result<String, String> {
     let mut keyring = try!(Keyring::attach(SpecialKeyring::SessionKeyring).map_err(|e| format!("{}", e)));
-    key.key_ref_str().map_err(|e| format!("{}", e)).
-        and_then(|ref refstr| keyring.add_logon_key(refstr, &key.to_payload()).map_err(|e| format!("{}", e))).
-        map(|_| ())
+    let key_ref = try!(key.key_ref_str().map_err(|e| format!("{}", e)));
+    let mut key = try!(keyring.add_logon_key(&key_ref, &key.to_payload()).map_err(|e| format!("{}", e)));
+    let uid = getuid();
+    if uid != geteuid() && geteuid() == 0 {
+        try!(key.chown(uid).map_err(|e| format!("{}", e)));
+    }
+    Ok(key_ref)
 }
 
 impl PamServiceModule for SM {
     fn authenticate(self: &Self, pamh: Pam, _: PamFlag, args: Vec<String>) -> PamReturnCode {
-        println!("In pam open_session !");
-        println!("Getting auth token");
-        println!("Args : {:?}", args);
         match pamh.get_authtok() {
             Err(e) => {
-                println!("Error getting password : {}", e);
+                println!("pam_e4crypt: Error getting password : {}", e);
                 PamReturnCode::SERVICE_ERR
             }
             Ok(None) => {
-                println!("No auth token available");
+                println!("pam_e4crypt: No auth token available");
                 PamReturnCode::CRED_UNAVAIL
             }
             Ok(Some(token)) => {
-                println!("Got token !");
                 for arg in args.iter() {
-                    match Salt::new(arg).
-                        map(|salt| Ext4Key::new(token.to_bytes(), salt)).
+                    match Salt::new(arg).map(|salt| Ext4Key::new(token.to_bytes(), salt)).
                         and_then(|key| add_key2(&key).map_err(|e| From::from(e))) {
                         Err(e) => {
-                            println!("Error : {}", e);
+                            println!("pam_e4crypt: Error : {}", e);
                             return PamReturnCode::SERVICE_ERR;
                         }
-                        Ok(_) => println!("Key added successfuly for directory {}", arg),
+                        Ok(key_ref) => println!("pam_e4crypt: Added key with descriptor {} for directory {}", key_ref,arg),
                     }
                 }
                 PamReturnCode::IGNORE
