@@ -7,6 +7,7 @@ authors = ["Raphael Catolino <raphael.catolino@gmail.com>"]
 crate-type = ["dylib"]
 
 [dependencies]
-pam_sm = { path = "../pam_sm_rust", version = "0.1"}
+pam_sm = { path = "../pam_sm_rust", version = "0.1" }
 nix = "0.7.0"
 ring = "0.6.1"
+keyutils = { path = "../rust-keyutils", version = "0.2.1" }

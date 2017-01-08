@@ -1,30 +1,38 @@
+extern crate keyutils;
 #[macro_use] extern crate nix;
 extern crate pam_sm;
 extern crate ring;
 
+use keyutils::{Keyring, SpecialKeyring};
 use pam_sm::pam::{PamServiceModule, Pam, PamFlag, PamReturnCode};
 use ring::{digest, pbkdf2};
 use std::error::Error;
 use std::ffi::CStr;
 use std::fmt;
 use std::fs::File;
+use std::mem::transmute;
 use std::process::{Command, Stdio};
 use std::io::Write;
 use std::os::unix::io::AsRawFd;
 
-static PBKDF2_ITERATIONS: usize = 0xFFFF;
+const PBKDF2_ITERATIONS: usize = 0xFFFF;
+const SALT_SIZE: usize = 16;
+const KEY_SIZE: usize = 64;
 
 struct SM;
 
-struct Salt([u8; 16]);
+struct Salt([u8; SALT_SIZE]);
 
 impl Salt {
-    fn new() -> Self {
-        Salt([0u8; 16])
-    }
-
-    fn as_ptr(&self) -> *const u8 {
-        self.0.as_ptr()
+    ioctl!(write buf fs_get_pwsalt with b'f', 20 ; u8);
+    fn new(path: &String) -> Result<Salt, Box<Error>> {
+        let f = try!(File::open(path));
+        let salt = [0u8; SALT_SIZE];
+        println!("File descriptor of {} : {}", path, f.as_raw_fd());
+        try!(unsafe {
+            Salt::fs_get_pwsalt(f.as_raw_fd(), salt.as_ptr(), SALT_SIZE)
+        });
+        Ok(Salt(salt))
     }
 }
 
@@ -37,37 +45,78 @@ impl fmt::Display for Salt {
     }
 }
 
+#[allow(dead_code)]
+#[derive(Copy, Clone)]
+enum Ext4EncryptionMode {
+    Invalid=0,
+    Aes256Xts=1,
+    Aes256Gcm=2,
+    Aes256Cbc=3,
+    Aes256Cts=4,
+}
+
 struct Ext4Key {
-    key: [u8; 64],
+    key: [u8; KEY_SIZE],
+    mode: Ext4EncryptionMode,
     key_ref: [u8; 8],
 }
 
 impl Ext4Key {
     fn new(token: &[u8], salt: Salt) -> Ext4Key {
-        let mut key = [0u8; 64];
+        let mut key = Ext4Key {
+            key: [0u8; KEY_SIZE],
+            mode: Ext4EncryptionMode::Aes256Xts,
+            key_ref: Default::default()
+        };
         println!("Using token: {:?}", token);
         println!("Using salt : {}", salt);
-        pbkdf2::derive(&pbkdf2::HMAC_SHA512, PBKDF2_ITERATIONS, &salt.0, token, &mut key);
-        let digest = digest::digest(&digest::SHA512, digest::digest(&digest::SHA512, &key).as_ref());
-        let mut key_ref = [0u8; 8];
-        for (src, dst) in digest.as_ref().iter().zip(key_ref.iter_mut()) {
+        pbkdf2::derive(&pbkdf2::HMAC_SHA512, PBKDF2_ITERATIONS, &salt.0, token, &mut key.key);
+        let digest = digest::digest(&digest::SHA512, &key.key);
+        for (src, dst) in digest.as_ref().iter().zip(key.key_ref.iter_mut()) {
             *dst = *src;
         }
-        Ext4Key { key: key, key_ref: key_ref }
+        key
+    }
+
+    fn key_ref_str(&self) -> Result<String, fmt::Error> {
+        use std::fmt::Write;
+        let prefix = "ext4:";
+        let mut ref_str = String::with_capacity(prefix.len() + self.key_ref.len()*2);
+        ref_str.push_str(prefix);
+        for b in self.key_ref.iter() {
+            try!(write!(ref_str, "{:02x}", b));
+        }
+        println!("key description str : {}", &ref_str);
+        Ok(ref_str)
+    }
+
+    fn to_payload(&self) -> Vec<u8> {
+        let mut buff = Vec::with_capacity(8+KEY_SIZE); // sizeof(u32 + [u8; KEY_SIZE] + u32)
+        buff.extend(unsafe { &transmute::<u32, [u8; 4]>(self.mode as u32) });
+        buff.extend(self.key.iter());
+        buff.extend(unsafe { &transmute::<u32, [u8; 4]>(KEY_SIZE as u32) });
+        buff
     }
 }
 
 impl fmt::Display for Ext4Key {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         for b in self.key.iter() {
-            try!(write!(f, "{:02X}", b));
+            try!(write!(f, "{:02x}", b));
         }
         try!(write!(f, "::"));
         for b in self.key_ref.iter() {
-            try!(write!(f, "{:02X}", b));
+            try!(write!(f, "{:02x}", b));
         }
         Ok(())
     }
+}
+
+fn add_key2(key: &Ext4Key) -> Result<(), String> {
+    let mut keyring = try!(Keyring::attach(SpecialKeyring::SessionKeyring).map_err(|e| format!("{}", e)));
+    key.key_ref_str().map_err(|e| format!("{}", e)).
+        and_then(|ref refstr| keyring.add_logon_key(refstr, &key.to_payload()).map_err(|e| format!("{}", e))).
+        map(|_| ())
 }
 
 fn add_key(token: &CStr) -> Result<(), Box<Error>> {
@@ -78,18 +127,6 @@ fn add_key(token: &CStr) -> Result<(), Box<Error>> {
     };
     try!(process.wait());
     result
-}
-
-ioctl!(write buf fs_get_pwsalt with b'f', 20 ; u8);
-
-fn get_salt(path: &String) -> Result<Salt, Box<Error>> {
-    let f = try!(File::open(path));
-    let salt = Salt::new();
-    println!("File descriptor of {} : {}", path, f.as_raw_fd());
-    try!(unsafe {
-        fs_get_pwsalt(f.as_raw_fd(), salt.as_ptr(), 16)
-    });
-    Ok(salt)
 }
 
 impl PamServiceModule for SM {
@@ -109,20 +146,25 @@ impl PamServiceModule for SM {
             Ok(Some(token)) => {
                 println!("Got token !");
                 for arg in args.iter() {
-                    match get_salt(arg) {
-                        Err(e) => println!("Error getting salt : {}", e),
-                        Ok(salt) => {
-                            println!("Got salt {}", salt);
-                            println!("Got key {}", Ext4Key::new(token.to_bytes(), salt));
+                    match Salt::new(arg).
+                        map(|salt| Ext4Key::new(token.to_bytes(), salt)).
+                        and_then(|key| add_key2(&key).map_err(|e| From::from(e))) {
+                        Err(e) => {
+                            println!("Error : {}", e);
+                            return PamReturnCode::SERVICE_ERR;
                         }
+                        Ok(_) => println!("Key added successfuly for directory {}", arg),
                     }
                 }
-                if let Err(e) = add_key(token) {
+                PamReturnCode::IGNORE
+                /*
+                if let Err(e) = add_key2(token) {
                     println!("Error adding key : {}", e);
                     PamReturnCode::SYSTEM_ERR
                 } else {
                     PamReturnCode::IGNORE
                 }
+                */
             }
         }
     }
@@ -138,5 +180,5 @@ pub extern "C" fn get_pam_sm() -> Box<PamServiceModule> {
 #[no_mangle]
 #[allow(non_snake_case)]
 pub unsafe extern "C" fn RAND_bytes(_: *mut u8, _: *mut u8, _: usize) -> i32 {
-    0
+    panic!();
 }
