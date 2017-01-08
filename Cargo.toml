@@ -1,13 +1,15 @@
 [package]
-name = "pam-e4addkey"
+name = "pame4key"
 version = "0.1.0"
 authors = ["Raphael Catolino <raphael.catolino@gmail.com>"]
+license = "GPLv3"
+homepage = "https://github.com/rcatolino/pam_ext4_keys"
 
 [lib]
 crate-type = ["dylib"]
 
 [dependencies]
-pam_sm = { path = "../pam_sm_rust", version = "0.1" }
+pamsm = { git = "https://github.com/rcatolino/pam_sm_rust" }
 nix = "0.7.0"
 ring = "0.6.1"
-keyutils = { path = "../rust-keyutils", version = "0.2.1" }
+keyutils = { git = "https://github.com/rcatolino/rust-keyutils" }

@@ -1,11 +1,11 @@
 extern crate keyutils;
 #[macro_use] extern crate nix;
-extern crate pam_sm;
+extern crate pamsm;
 extern crate ring;
 
 use keyutils::{Keyring, SpecialKeyring};
 use nix::unistd::{geteuid, getuid};
-use pam_sm::pam::{PamServiceModule, Pam, PamFlag, PamReturnCode};
+use pamsm::{PamServiceModule, Pam, PamFlag, PamReturnCode};
 use ring::{digest, pbkdf2};
 use std::error::Error;
 use std::fmt;
@@ -17,12 +17,11 @@ const PBKDF2_ITERATIONS: usize = 0xFFFF;
 const SALT_SIZE: usize = 16;
 const KEY_SIZE: usize = 64;
 
-struct SM;
-
 struct Salt([u8; SALT_SIZE]);
 
 impl Salt {
     ioctl!(write buf fs_get_pwsalt with b'f', 20 ; u8);
+
     fn new(path: &String) -> Result<Salt, Box<Error>> {
         let f = try!(File::open(path));
         let salt = [0u8; SALT_SIZE];
@@ -106,7 +105,7 @@ impl fmt::Display for Ext4Key {
     }
 }
 
-fn add_key2(key: &Ext4Key) -> Result<String, String> {
+fn add_key(key: &Ext4Key) -> Result<String, String> {
     let mut keyring = try!(Keyring::attach(SpecialKeyring::SessionKeyring).map_err(|e| format!("{}", e)));
     let key_ref = try!(key.key_ref_str().map_err(|e| format!("{}", e)));
     let mut key = try!(keyring.add_logon_key(&key_ref, &key.to_payload()).map_err(|e| format!("{}", e)));
@@ -116,6 +115,8 @@ fn add_key2(key: &Ext4Key) -> Result<String, String> {
     }
     Ok(key_ref)
 }
+
+struct SM;
 
 impl PamServiceModule for SM {
     fn authenticate(self: &Self, pamh: Pam, _: PamFlag, args: Vec<String>) -> PamReturnCode {
@@ -131,7 +132,7 @@ impl PamServiceModule for SM {
             Ok(Some(token)) => {
                 for arg in args.iter() {
                     match Salt::new(arg).map(|salt| Ext4Key::new(token.to_bytes(), salt)).
-                        and_then(|key| add_key2(&key).map_err(|e| From::from(e))) {
+                        and_then(|key| add_key(&key).map_err(|e| From::from(e))) {
                         Err(e) => {
                             println!("pam_e4crypt: Error : {}", e);
                             return PamReturnCode::SERVICE_ERR;
@@ -140,14 +141,6 @@ impl PamServiceModule for SM {
                     }
                 }
                 PamReturnCode::IGNORE
-                /*
-                if let Err(e) = add_key2(token) {
-                    println!("Error adding key : {}", e);
-                    PamReturnCode::SYSTEM_ERR
-                } else {
-                    PamReturnCode::IGNORE
-                }
-                */
             }
         }
     }
