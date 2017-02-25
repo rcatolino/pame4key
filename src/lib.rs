@@ -3,9 +3,10 @@ extern crate keyutils;
 extern crate pamsm;
 extern crate ring;
 
-use keyutils::{Keyring, SpecialKeyring};
+use keyutils::{Keyring, KeyType, SpecialKeyring};
 use nix::unistd::{geteuid, getuid};
-use pamsm::{PamServiceModule, Pam, PamFlag, PamReturnCode};
+use pamsm::{PamServiceModule, Pam};
+use pamsm::pam_raw::{PamFlag, PamError};
 use ring::{digest, pbkdf2};
 use std::error::Error;
 use std::fmt;
@@ -108,7 +109,7 @@ impl fmt::Display for Ext4Key {
 fn add_key(key: &Ext4Key) -> Result<String, String> {
     let mut keyring = try!(Keyring::attach(SpecialKeyring::SessionKeyring).map_err(|e| format!("{}", e)));
     let key_ref = try!(key.key_ref_str().map_err(|e| format!("{}", e)));
-    let mut key = try!(keyring.add_logon_key(&key_ref, &key.to_payload()).map_err(|e| format!("{}", e)));
+    let mut key = try!(keyring.add_key(KeyType::Logon, &key_ref, &key.to_payload()).map_err(|e| format!("{}", e)));
     let uid = getuid();
     if uid != geteuid() && geteuid() == 0 {
         try!(key.chown(uid).map_err(|e| format!("{}", e)));
@@ -116,18 +117,24 @@ fn add_key(key: &Ext4Key) -> Result<String, String> {
     Ok(key_ref)
 }
 
+/*
+fn read_keyfile(keyfile_path: &str) -> Result<Vec<[u8; KEY_SIZE]>> {
+    let kf = try!(File::open(keyfile_path));
+}
+*/
+
 struct SM;
 
 impl PamServiceModule for SM {
-    fn authenticate(self: &Self, pamh: Pam, _: PamFlag, args: Vec<String>) -> PamReturnCode {
-        match pamh.get_authtok() {
+    fn authenticate(self: &Self, pamh: Pam, _: PamFlag, args: Vec<String>) -> PamError {
+        match pamh.get_cached_authtok() {
             Err(e) => {
                 println!("pam_e4crypt: Error getting password : {}", e);
-                PamReturnCode::SERVICE_ERR
+                PamError::SERVICE_ERR
             }
             Ok(None) => {
                 println!("pam_e4crypt: No auth token available");
-                PamReturnCode::CRED_UNAVAIL
+                PamError::CRED_UNAVAIL
             }
             Ok(Some(token)) => {
                 for arg in args.iter() {
@@ -135,12 +142,12 @@ impl PamServiceModule for SM {
                         and_then(|key| add_key(&key).map_err(|e| From::from(e))) {
                         Err(e) => {
                             println!("pam_e4crypt: Error : {}", e);
-                            return PamReturnCode::SERVICE_ERR;
+                            return PamError::SERVICE_ERR;
                         }
                         Ok(key_ref) => println!("pam_e4crypt: Added key with descriptor {} for directory {}", key_ref,arg),
                     }
                 }
-                PamReturnCode::IGNORE
+                PamError::IGNORE
             }
         }
     }
